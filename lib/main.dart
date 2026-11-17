@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -26,8 +28,37 @@ void main() => runApp(
 
 // ───────────────────────────── Home ─────────────────────────────
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  /// Pre-warm: a hidden, never-displayed WebView that loads YouTube's embed
+  /// page while the user is on this screen. It starts the WebView engine and
+  /// caches the player's scripts, so the real player boots faster on "Join".
+  /// (It doesn't autoplay and is never shown.)
+  late final WebViewController _warmUp = WebViewController()
+    ..setJavaScriptMode(JavaScriptMode.unrestricted)
+    ..setNavigationDelegate(
+      NavigationDelegate(
+        // Only the embed page itself; no navigation anywhere else.
+        onNavigationRequest: (r) => r.url.contains('/embed/')
+            ? NavigationDecision.navigate
+            : NavigationDecision.prevent,
+      ),
+    )
+    ..loadRequest(
+      Uri.parse('https://www.youtube-nocookie.com/embed/$videoId?controls=0'),
+    );
+
+  @override
+  void initState() {
+    super.initState();
+    _warmUp; // create it now
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -84,26 +115,21 @@ class LiveClassPage extends StatefulWidget {
 }
 
 class _LiveClassPageState extends State<LiveClassPage> {
-  late final YoutubePlayerController _controller;
-  late final StreamSubscription<YoutubePlayerValue> _sub;
+  late YoutubePlayerController _controller = _createController();
   final _message = TextEditingController();
   bool _fullscreen = false;
-
-  /// YouTube shows its title bar for the first ~4s of playback. Until this
-  /// intro is over the video plays muted behind the cover, then it unmutes.
-  static const _introHold = Duration(milliseconds: 4500);
-  Timer? _introTimer;
-  bool _introDone = false;
 
   @override
   void initState() {
     super.initState();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  }
 
+  YoutubePlayerController _createController() {
     // Created without a video key on purpose: with a key the package paints
     // the video thumbnail over everything while the player boots, hiding our
     // breathing loader. The video is loaded right after instead.
-    _controller = YoutubePlayerController(
+    final controller = YoutubePlayerController(
       params: const YoutubePlayerParams(
         showControls: false,
         showFullscreenButton: false,
@@ -111,40 +137,41 @@ class _LiveClassPageState extends State<LiveClassPage> {
         strictRelatedVideos: true,
         enableCaption: false,
         pointerEvents: PointerEvents.none,
-        mute: true, // unmuted once the intro hold is over
+        mute: true, // unmuted when the intro cover lifts
       ),
     );
-    _controller.loadVideoById(
+    // Start a little early: the intro plays muted behind the cover and the
+    // cover lifts right at the requested position. (Never seek to fix the
+    // offset: a seek makes YouTube show its overlay again.)
+    controller.loadVideoById(
       videoId: videoId,
-      // Start a little early: the intro hold plays muted behind the cover and
-      // ends right at the requested position. (Seeking is not an option — it
-      // makes YouTube show its title bar again.)
-      startSeconds: (widget.startSeconds - _introHold.inMilliseconds / 1000)
-          .clamp(0, double.infinity)
-          .toDouble(),
+      startSeconds:
+          (widget.startSeconds -
+                  _PlayerControlsState._introHold.inMilliseconds / 1000)
+              .clamp(0, double.infinity)
+              .toDouble(),
     );
-    _sub = _controller.stream.listen((v) {
-      if (v.playerState == PlayerState.playing && _introTimer == null) {
-        _introTimer = Timer(_introHold, _finishIntro);
-      }
-    });
     // Never let a YouTube link (logo / title / share) leave the player.
-    _controller.webViewController.setNavigationDelegate(
+    controller.webViewController.setNavigationDelegate(
       NavigationDelegate(
         onNavigationRequest: (_) => NavigationDecision.prevent,
       ),
     );
+    return controller;
   }
 
-  void _finishIntro() {
-    _controller.unMute();
-    if (mounted) setState(() => _introDone = true);
+  /// Connection came back before the class ever started playing (e.g. the
+  /// user joined while offline). YouTube's player script never loaded, so
+  /// nothing can resume: throw the player away and build a fresh one.
+  void _restartPlayer() {
+    if (!mounted) return;
+    final old = _controller;
+    setState(() => _controller = _createController());
+    old.close();
   }
 
   @override
   void dispose() {
-    _introTimer?.cancel();
-    _sub.cancel();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _controller.close();
@@ -246,6 +273,8 @@ class _LiveClassPageState extends State<LiveClassPage> {
                     width: baseW,
                     height: baseH,
                     child: YoutubePlayer(
+                      // New controller → new player (see _restartPlayer).
+                      key: ObjectKey(_controller),
                       controller: _controller,
                       autoFullScreen: false,
                       enableFullScreenOnVerticalDrag: false,
@@ -265,11 +294,11 @@ class _LiveClassPageState extends State<LiveClassPage> {
                           child: _PlayerControls(
                             controller: _controller,
                             isFullscreen: _fullscreen,
-                            holdCover: !_introDone,
                             onBack: () => _fullscreen
                                 ? _setFullscreen(false)
                                 : Navigator.of(context).maybePop(),
                             onFullscreen: () => _setFullscreen(!_fullscreen),
+                            onReconnectBeforeStart: _restartPlayer,
                           ),
                         ),
                       ),
@@ -293,31 +322,44 @@ class _PlayerControls extends StatefulWidget {
     required this.isFullscreen,
     required this.onBack,
     required this.onFullscreen,
-    this.holdCover = false,
+    required this.onReconnectBeforeStart,
   });
 
   final YoutubePlayerController controller;
   final bool isFullscreen;
-
-  /// Keep the cover up regardless of player state (used for the intro).
-  final bool holdCover;
   final VoidCallback onBack;
   final VoidCallback onFullscreen;
+
+  /// Back online, but the class never started playing → rebuild the player.
+  final VoidCallback onReconnectBeforeStart;
 
   @override
   State<_PlayerControls> createState() => _PlayerControlsState();
 }
 
 class _PlayerControlsState extends State<_PlayerControls> {
-  /// How long the cover stays after playback (re)starts — YouTube's own pause
-  /// bar / title fade out during this time.
+  /// First start: YouTube shows its overlay (title bar, centre pause icon,
+  /// "More videos") for ~4.2s after playback starts (measured). The video
+  /// plays muted behind the cover for this long, then unmutes.
+  static const _introHold = Duration(milliseconds: 4500);
+
+  /// Full cover after a later resume (YouTube's pause bar fades out).
   static const _settle = Duration(milliseconds: 1200);
 
+  /// Full cover after recovering from a buffering stall (YouTube keeps its
+  /// full overlay up ~4s after a stall).
+  static const _afterBuffering = Duration(milliseconds: 5000);
+
   late final StreamSubscription<YoutubePlayerValue> _sub;
+  late final StreamSubscription<List<ConnectivityResult>> _netSub;
   late final AppLifecycleListener _lifecycle;
   Timer? _uncover;
   bool _covered = true;
+  bool _everPlayed = false;
+  bool _stalled = false; // covered because of a mid-class stall
+  bool _offline = false;
   PlayerState _state = PlayerState.unknown;
+  final _clock = Stopwatch()..start(); // debug timing
 
   @override
   void initState() {
@@ -330,22 +372,54 @@ class _PlayerControlsState extends State<_PlayerControls> {
     _lifecycle = AppLifecycleListener(
       onResume: () => widget.controller.playVideo(),
     );
+    // Online / offline, for the loader message (and a nudge on reconnect).
+    final net = Connectivity();
+    net.checkConnectivity().then(_onNet);
+    _netSub = net.onConnectivityChanged.listen(_onNet);
+  }
+
+  void _onNet(List<ConnectivityResult> r) {
+    final offline = r.every((c) => c == ConnectivityResult.none);
+    if (kDebugMode) debugPrint('[player] offline=$offline');
+    if (_offline && !offline) {
+      // Back online: nudge playback, or rebuild the player if it never got
+      // going (its script failed to load while offline).
+      _everPlayed
+          ? widget.controller.playVideo()
+          : widget.onReconnectBeforeStart();
+    }
+    if (mounted) setState(() => _offline = offline);
   }
 
   void _onState(PlayerState s) {
+    final wasBuffering = _state == PlayerState.buffering;
     _state = s;
+    if (kDebugMode) {
+      debugPrint('[player] +${_clock.elapsedMilliseconds}ms state=$s');
+    }
     if (s == PlayerState.playing) {
-      _uncover ??= Timer(_settle, () {
-        if (mounted) setState(() => _covered = false);
-      });
-    } else if (s != PlayerState.buffering || _covered) {
-      // Paused / ended / cued / not started → cover immediately.
+      if (!_everPlayed) {
+        // First start: hold the cover through YouTube's intro overlay.
+        _everPlayed = true;
+        _uncover ??= Timer(_introHold, () {
+          widget.controller.unMute();
+          _reveal();
+        });
+      } else {
+        // After a stall YouTube keeps its title / "More videos" / logo overlay
+        // up for a few seconds, so hold the cover longer than after a resume.
+        _uncover ??= Timer(wasBuffering ? _afterBuffering : _settle, _reveal);
+      }
+    } else {
+      // Buffering / paused / ended / cued / not started → cover immediately.
+      // (Mid-playback buffering shows YouTube's full overlay + spinner.)
       _uncover?.cancel();
       _uncover = null;
       _covered = true;
+      if (_everPlayed && s == PlayerState.buffering) _stalled = true;
     }
     // There is no pause: if playback gets paused anyway (e.g. by the
-    // WebView), resume it — but only while the app is in the foreground.
+    // WebView), resume it, but only while the app is in the foreground.
     if (s == PlayerState.paused &&
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
       widget.controller.playVideo();
@@ -353,12 +427,46 @@ class _PlayerControlsState extends State<_PlayerControls> {
     if (mounted) setState(() {});
   }
 
+  void _reveal() {
+    if (!mounted) return;
+    setState(() {
+      _covered = false;
+      _stalled = false;
+    });
+  }
+
   @override
   void dispose() {
     _uncover?.cancel();
     _sub.cancel();
+    _netSub.cancel();
     _lifecycle.dispose();
     super.dispose();
+  }
+
+  /// What the loader says right now.
+  _LoaderMessage get _message {
+    if (_offline) {
+      return const _LoaderMessage(
+        icon: Icons.wifi_off_rounded,
+        headline: 'Internet connection lost',
+        sub: "We'll continue as soon as you're back online",
+      );
+    }
+    if (_stalled) {
+      return _state == PlayerState.playing
+          ? const _LoaderMessage(
+              icon: Icons.wifi_rounded,
+              headline: 'Connection is back',
+              sub: 'Resuming class…',
+            )
+          : const _LoaderMessage(
+              icon: Icons.network_check_rounded,
+              headline: 'Weak internet connection',
+              sub: 'Hang on, the class will resume shortly',
+            );
+    }
+    return const _LoaderMessage(sub: 'Settle in, class is starting');
   }
 
   @override
@@ -366,55 +474,78 @@ class _PlayerControlsState extends State<_PlayerControls> {
     final fs = widget.isFullscreen;
     final pad = fs ? 24.0 : 16.0;
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // Swallows taps on the video: there is nothing to tap.
-        AbsorbPointer(
-          child: _covered || widget.holdCover
-              ? _Cover(ended: _state == PlayerState.ended, fullscreen: fs)
-              : const SizedBox.expand(),
-        ),
-        Positioned(
-          left: pad,
-          top: pad,
-          child: _GlassButton(
-            icon: Icons.chevron_left,
-            circle: true,
-            onTap: widget.onBack,
-          ),
-        ),
-        Positioned(left: pad + 48, top: pad + 6, child: const _LiveBadge()),
-        // Time label only once the video is actually showing.
-        if (!(_covered || widget.holdCover))
-          Positioned(
-            left: pad,
-            bottom: pad,
-            child: StreamBuilder<YoutubeVideoState>(
-              stream: widget.controller.videoStateStream,
-              builder: (context, snap) => Text(
-                '${_fmt(snap.data?.position ?? Duration.zero)} / '
-                '${_fmt(widget.controller.value.metaData.duration)}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  shadows: [Shadow(blurRadius: 4, color: Colors.black54)],
+    return Builder(
+      builder: (context) {
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            // Swallows taps on the video: there is nothing to tap.
+            AbsorbPointer(
+              child: _covered
+                  ? _Cover(
+                      ended: _state == PlayerState.ended,
+                      fullscreen: fs,
+                      message: _message,
+                    )
+                  : const SizedBox.expand(),
+            ),
+            Positioned(
+              left: pad,
+              top: pad,
+              child: _GlassButton(
+                icon: Icons.chevron_left,
+                circle: true,
+                onTap: widget.onBack,
+              ),
+            ),
+            Positioned(left: pad + 48, top: pad + 6, child: const _LiveBadge()),
+            // Time label: only visible once the video is showing, but kept
+            // alive while hidden so it never flashes "00:00" when it reappears.
+            Positioned(
+              left: pad,
+              bottom: pad,
+              child: Visibility(
+                visible: !_covered,
+                maintainState: true,
+                child: StreamBuilder<YoutubeVideoState>(
+                  stream: widget.controller.videoStateStream,
+                  builder: (context, snap) => Text(
+                    '${_fmt(snap.data?.position ?? Duration.zero)} / '
+                    '${_fmt(widget.controller.value.metaData.duration)}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      shadows: [Shadow(blurRadius: 4, color: Colors.black54)],
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        Positioned(
-          right: pad,
-          bottom: pad - 6,
-          child: _GlassButton(
-            icon: fs ? Icons.fullscreen_exit : Icons.fullscreen,
-            onTap: widget.onFullscreen,
-          ),
-        ),
-      ],
+            Positioned(
+              right: pad,
+              bottom: pad - 6,
+              child: _GlassButton(
+                icon: fs ? Icons.fullscreen_exit : Icons.fullscreen,
+                onTap: widget.onFullscreen,
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
+}
+
+class _LoaderMessage {
+  const _LoaderMessage({this.icon, this.headline, required this.sub});
+
+  /// Status icon shown before the headline (network problems only).
+  final IconData? icon;
+
+  /// Bold line. Null → the breathing cue ("Breathe in… / Breathe out…").
+  final String? headline;
+  final String sub;
 }
 
 String _fmt(Duration d) {
@@ -424,15 +555,20 @@ String _fmt(Duration d) {
 }
 
 class _Cover extends StatelessWidget {
-  const _Cover({required this.ended, required this.fullscreen});
+  const _Cover({
+    required this.ended,
+    required this.fullscreen,
+    required this.message,
+  });
 
   final bool ended;
   final bool fullscreen;
+  final _LoaderMessage message;
 
   @override
   Widget build(BuildContext context) {
     // While waiting: a short guided breath instead of a spinner.
-    if (!ended) return const _BreathingLoader();
+    if (!ended) return _BreathingLoader(message: message);
 
     // After the video ends: just the thumbnail.
     return Stack(
@@ -453,7 +589,9 @@ class _Cover extends StatelessWidget {
 /// shrinks on "Breathe out", around a meditating figure. One breath is ~4s,
 /// so the intro hold feels like a warm-up rather than a wait.
 class _BreathingLoader extends StatefulWidget {
-  const _BreathingLoader();
+  const _BreathingLoader({required this.message});
+
+  final _LoaderMessage message;
 
   @override
   State<_BreathingLoader> createState() => _BreathingLoaderState();
@@ -492,6 +630,7 @@ class _BreathingLoaderState extends State<_BreathingLoader>
             builder: (context, _) {
               final t = Curves.easeInOut.transform(_breath.value);
               final inhaling = _breath.status == AnimationStatus.forward;
+              final msg = widget.message;
               return Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -525,22 +664,35 @@ class _BreathingLoaderState extends State<_BreathingLoader>
                   SizedBox(height: d * 0.08),
                   AnimatedSwitcher(
                     duration: const Duration(milliseconds: 400),
-                    child: Text(
-                      inhaling ? 'Breathe in…' : 'Breathe out…',
-                      key: ValueKey(inhaling),
-                      style: const TextStyle(
-                        color: cream,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.6,
-                      ),
+                    child: Row(
+                      // Key: the breath cue when there's no headline, else the
+                      // headline itself (so it only animates when it changes).
+                      key: ValueKey(msg.headline ?? inhaling),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (msg.icon != null) ...[
+                          Icon(msg.icon, color: cream, size: 18),
+                          const SizedBox(width: 6),
+                        ],
+                        Text(
+                          msg.headline ??
+                              (inhaling ? 'Breathe in…' : 'Breathe out…'),
+                          style: const TextStyle(
+                            color: cream,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Settle in, class is starting',
+                    msg.sub,
+                    textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: cream.withValues(alpha: 0.75),
+                      color: cream.withValues(alpha: 0.8),
                       fontSize: 12,
                     ),
                   ),
