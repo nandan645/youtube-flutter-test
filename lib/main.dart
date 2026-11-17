@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 
-const videoId = 'aqz-KE-bpKQ';
+const videoId = 'DJ4-cgGjn1s';
 
 const cream = Color(0xFFF8F6F1);
 const green = Color(0xFF2E6B4B);
@@ -349,10 +349,16 @@ class _PlayerControlsState extends State<_PlayerControls> {
   /// full overlay up ~4s after a stall).
   static const _afterBuffering = Duration(milliseconds: 5000);
 
+  /// Back button / LIVE pill / fullscreen button fade out after this long
+  /// while the video is showing. A tap on the video brings them back.
+  static const _chromeHold = Duration(seconds: 3);
+
   late final StreamSubscription<YoutubePlayerValue> _sub;
   late final StreamSubscription<List<ConnectivityResult>> _netSub;
   late final AppLifecycleListener _lifecycle;
   Timer? _uncover;
+  Timer? _chromeTimer;
+  bool _chromeVisible = true; // back / LIVE / fullscreen
   bool _covered = true;
   bool _everPlayed = false;
   bool _stalled = false; // covered because of a mid-class stall
@@ -397,6 +403,7 @@ class _PlayerControlsState extends State<_PlayerControls> {
       debugPrint('[player] +${_clock.elapsedMilliseconds}ms state=$s');
     }
     if (s == PlayerState.playing) {
+      _killCaptions();
       if (!_everPlayed) {
         // First start: hold the cover through YouTube's intro overlay.
         _everPlayed = true;
@@ -415,6 +422,7 @@ class _PlayerControlsState extends State<_PlayerControls> {
       _uncover?.cancel();
       _uncover = null;
       _covered = true;
+      _showChrome(autoHide: false); // always reachable while covered
       if (_everPlayed && s == PlayerState.buffering) _stalled = true;
     }
     // There is no pause: if playback gets paused anyway (e.g. by the
@@ -426,22 +434,88 @@ class _PlayerControlsState extends State<_PlayerControls> {
     if (mounted) setState(() {});
   }
 
+  /// Captions off for good. `cc_load_policy=0` (enableCaption: false) is only
+  /// a hint: YouTube still shows captions when the uploader or viewer has them
+  /// on by default. Unloading the captions module through the IFrame API
+  /// switches them off; run it now and once more shortly after, because the
+  /// module can load a moment after playback starts.
+  void _killCaptions() {
+    const js =
+        "try{player.unloadModule('captions');player.unloadModule('cc');"
+        "player.setOption('captions','track',{});}catch(e){}";
+    final web = widget.controller.webViewController;
+    web.runJavaScript(js);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) web.runJavaScript(js);
+    });
+  }
+
   void _reveal() {
     if (!mounted) return;
     setState(() {
       _covered = false;
       _stalled = false;
     });
+    _showChrome(); // visible for a moment, then fades
+  }
+
+  /// Show back / LIVE / fullscreen; fade them out after [_chromeHold] unless
+  /// the video is covered.
+  void _showChrome({bool autoHide = true}) {
+    _chromeTimer?.cancel();
+    _chromeVisible = true;
+    if (autoHide && !_covered) {
+      _chromeTimer = Timer(_chromeHold, () {
+        if (mounted && !_covered) setState(() => _chromeVisible = false);
+      });
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// Tap on the video: toggle the buttons (there is no pause).
+  void _onVideoTap() {
+    if (_covered) return;
+    if (_chromeVisible) {
+      _chromeTimer?.cancel();
+      setState(() => _chromeVisible = false);
+    } else {
+      _showChrome();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_PlayerControls old) {
+    super.didUpdateWidget(old);
+    // Entering / leaving fullscreen: show the buttons briefly again.
+    if (old.isFullscreen != widget.isFullscreen) _showChrome();
   }
 
   @override
   void dispose() {
     _uncover?.cancel();
+    _chromeTimer?.cancel();
     _sub.cancel();
     _netSub.cancel();
     _lifecycle.dispose();
     super.dispose();
   }
+
+  /// Wraps a [Positioned] button so it fades with the chrome and can't be
+  /// tapped while invisible.
+  Widget _fading(Positioned child) => Positioned(
+    left: child.left,
+    top: child.top,
+    right: child.right,
+    bottom: child.bottom,
+    child: IgnorePointer(
+      ignoring: !_chromeVisible,
+      child: AnimatedOpacity(
+        opacity: _chromeVisible ? 1 : 0,
+        duration: const Duration(milliseconds: 300),
+        child: child.child,
+      ),
+    ),
+  );
 
   /// What the loader says right now.
   _LoaderMessage get _message {
@@ -478,8 +552,11 @@ class _PlayerControlsState extends State<_PlayerControls> {
         return Stack(
           fit: StackFit.expand,
           children: [
-            // Swallows taps on the video: there is nothing to tap.
-            AbsorbPointer(
+            // Taps on the video never reach YouTube; they only show / hide
+            // our buttons (there is no pause).
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _onVideoTap,
               child: _covered
                   ? _Cover(
                       ended: _state == PlayerState.ended,
@@ -488,22 +565,35 @@ class _PlayerControlsState extends State<_PlayerControls> {
                     )
                   : const SizedBox.expand(),
             ),
-            Positioned(
-              left: pad,
-              top: pad,
-              child: _GlassButton(
-                icon: Icons.chevron_left,
-                circle: true,
-                onTap: widget.onBack,
+            _fading(
+              Positioned(
+                left: pad,
+                top: pad,
+                child: _GlassButton(
+                  icon: Icons.chevron_left,
+                  circle: true,
+                  onTap: widget.onBack,
+                ),
               ),
             ),
-            Positioned(left: pad + 48, top: pad + 6, child: const _LiveBadge()),
-            Positioned(
-              right: pad,
-              bottom: pad - 6,
-              child: _GlassButton(
-                icon: fs ? Icons.fullscreen_exit : Icons.fullscreen,
-                onTap: widget.onFullscreen,
+            _fading(
+              Positioned(
+                left: pad + 48,
+                top: pad + 6,
+                child: const _LiveBadge(),
+              ),
+            ),
+            _fading(
+              Positioned(
+                right: pad,
+                bottom: pad - 6,
+                child: _GlassButton(
+                  icon: fs ? Icons.fullscreen_exit : Icons.fullscreen,
+                  onTap: () {
+                    widget.onFullscreen();
+                    _showChrome();
+                  },
+                ),
               ),
             ),
           ],
