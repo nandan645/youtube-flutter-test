@@ -15,12 +15,12 @@ A throwaway Flutter (Android) prototype that proves we can play a **YouTube vide
   <tr>
     <td align="center" width="33%"><img src="docs/screenshots/1-home.jpg" width="240" alt="Home screen with four Join buttons" /><br/><sub><b>Home</b>: join on time or late</sub></td>
     <td align="center" width="33%"><img src="docs/screenshots/2-loader.jpg" width="240" alt="Breathing loader while the class starts" /><br/><sub><b>Loader</b>: guided breathing while the player warms up</sub></td>
-    <td align="center" width="33%"><img src="docs/screenshots/3-playing.jpg" width="240" alt="Video playing with no YouTube UI" /><br/><sub><b>Class</b>: video with no YouTube UI ("Join 5 mins late" → 05:05)</sub></td>
+    <td align="center" width="33%"><img src="docs/screenshots/3-playing.jpg" width="240" alt="Video playing with no YouTube UI" /><br/><sub><b>Class</b>: video with no YouTube UI</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="docs/screenshots/4-message.jpg" width="240" alt="Typing a message to the instructor" /><br/><sub><b>Message</b>: privacy banner stays above the keyboard</sub></td>
     <td align="center"><img src="docs/screenshots/5-offline.jpg" width="240" alt="Internet connection lost message" /><br/><sub><b>Offline</b>: "Internet connection lost"</sub></td>
-    <td align="center"><img src="docs/screenshots/6-reconnected.jpg" width="240" alt="Connection is back, resuming class" /><br/><sub><b>Reconnected</b>: "Connection is back, resuming class…"</sub></td>
+    <td align="center"><img src="docs/screenshots/6-weak.jpg" width="240" alt="Weak internet connection message" /><br/><sub><b>Weak connection</b>: online but still stalled</sub></td>
   </tr>
   <tr>
     <td align="center" colspan="3"><img src="docs/screenshots/7-fullscreen.jpg" width="720" alt="Fullscreen landscape playback" /><br/><sub><b>Fullscreen</b>: landscape, immersive, still no YouTube UI</sub></td>
@@ -32,6 +32,11 @@ A throwaway Flutter (Android) prototype that proves we can play a **YouTube vide
 ---
 
 Everything lives in **one file, `lib/main.dart`**, so it's easy to lift into the real product. This document explains *what* we did, *why* each piece exists, and *what to keep in mind when porting it*.
+
+**Reading guide**
+- Just want the rules? Read [§3 The core problem](#3-the-core-problem) and [§4 Techniques](#4-techniques-and-why-each-exists).
+- Rebuilding this somewhere else? Follow [Appendix A: Build it step by step](#appendix-a-build-it-step-by-step). It walks through the whole thing in build order, with the code.
+- Want to know what we tried and why it ended up this way? See [Appendix B: How we got here](#appendix-b-how-we-got-here-iteration-log), the iteration log with every dead end and measurement.
 
 > ⚠️ **Policy note — read first.** Hiding YouTube's branding, controls and links breaks the
 > [YouTube API Services Developer Policies](https://developers.google.com/youtube/terms/developer-policies)
@@ -47,7 +52,7 @@ Everything lives in **one file, `lib/main.dart`**, so it's easy to lift into the
 | Screen | Behaviour |
 |---|---|
 | **Home** | Blank page with four buttons: *Join class* (00:00), *Join 2:30 mins late* (02:30), *Join 5 mins late* (05:00), *Join 08:15 mins late* (08:15). |
-| **Live class** | Matches the design mock: video at the top with a back button, red **LIVE** pill, `mm:ss / mm:ss` time, fullscreen button, thin red progress bar, message box with a green send button, and the *"Only you and the instructor can see your messages"* banner, which stays above the keyboard. |
+| **Live class** | Matches the design mock: video at the top with a back button, red **LIVE** pill, fullscreen button, message box with a green send button, and the *"Only you and the instructor can see your messages"* banner, which stays above the keyboard. |
 | **Loading** | A green panel with a meditating figure inside a breathing circle (*Breathe in… / Breathe out…*, ~4 s per breath). It covers the video until YouTube's own UI has gone. |
 | **Network trouble** | The same loader, with a clear message (see [4.9](#49-network-problems-clear-messages-and-self-recovery)). |
 | **Fullscreen** | Landscape and immersive, video only. Back or the exit button returns to portrait. |
@@ -114,7 +119,7 @@ _controller.webViewController.setNavigationDelegate(
 ### 4.3 Overlays MUST go through `controlsBuilder` (gotcha!)
 On Android and iOS, `youtube_player_iframe` renders the WebView inside an **`OverlayPortal` above the whole page**. Anything you put on top of `YoutubePlayer` in a normal `Stack` is drawn **underneath** the video and is invisible. That's why our back button, LIVE pill and cover didn't show at first.
 
-✅ Everything drawn over the video (cover, loader, back, LIVE, time, fullscreen) is returned from **`YoutubePlayer(controlsBuilder: ...)`**, which the package draws above the WebView.
+✅ Everything drawn over the video (cover, loader, back, LIVE, fullscreen) is returned from **`YoutubePlayer(controlsBuilder: ...)`**, which the package draws above the WebView.
 
 ### 4.4 Cover the player whenever YouTube would show UI
 `_PlayerControls` listens to `controller.stream` and shows an opaque cover:
@@ -127,8 +132,6 @@ On Android and iOS, `youtube_player_iframe` renders the WebView inside an **`Ove
 | `ended` | video thumbnail (hides YouTube's end-screen suggestions) |
 | `playing` after a pause | stays up **1.2 s more** (`_settle`): YouTube's pause bar *fades* out after resuming |
 | `playing` after buffering | stays up **5 s more** (`_afterBuffering`): YouTube keeps its overlay up ~4 s after a stall (measured: still visible at 4.0 s, gone by 4.25 s) |
-
-The time label stays mounted while hidden (`Visibility(maintainState: true)`); otherwise it flashes `00:00` when it reappears.
 
 How the stall was reproduced: start playback, then `adb shell svc wifi disable && adb shell svc data disable` until the player logs `buffering` (~30–60 s, once the buffer drains), re-enable both, and screen-record the recovery. In debug builds every state change is printed as `[player] state=...`.
 
@@ -206,7 +209,7 @@ Total wait now: ~1–1.7 s boot + 4.5 s intro hold.
 | `_PlayerControls` | Everything drawn over the video; cover logic (4.4), intro hold (4.6), no-pause (4.7), network messages and reconnect (4.9). |
 | `_Cover` / `_BreathingLoader` / `_LoaderMessage` | Loader (breathing, `_half` = 2 s in / 2 s out) with the current message, or end-of-video thumbnail. |
 | `_HomePageState._warmUp` | Hidden pre-warm WebView (4.10). |
-| `_ProgressBar`, `_MessageInput`, `_PrivacyBanner`, `_LiveBadge`, `_GlassButton` | UI from the design mock. Messages are **not sent anywhere** yet (field just clears). |
+| `_MessageInput`, `_PrivacyBanner`, `_LiveBadge`, `_GlassButton` | UI from the design mock. Messages are **not sent anywhere** yet (field just clears). |
 
 Tunables:
 
@@ -241,7 +244,7 @@ Status of checks on the test device (Nothing A024, Android 17):
 - ✅ Mid-class buffering stall (network cut) → "Internet connection lost" → "Connection is back" → clean video
 - ✅ Joining while offline → "Internet connection lost" → player restarts on reconnect, playing ~5 s later
 - ✅ Pre-warm: first join tap → playing 1.7 s (was 2.3 s)
-- ⚠️ **"Weak internet connection"** (online but stalling) was **not** tested: there's no way to throttle the phone's network without root. Only the offline path was exercised.
+- ✅ **"Weak internet connection"** seen on device: right after the network came back, while YouTube was still stalled (online + buffering). A genuinely slow connection couldn't be simulated (no way to throttle the phone's network without root).
 - ✅ No Flutter exceptions in logs
 - ⚠️ **Audio returning after unmute was not checked by ear.** Please confirm.
 - ⚠️ Not tested on iOS (the package behaves differently there; e.g. its navigation handling and OverlayPortal paths).
@@ -257,7 +260,7 @@ Status of checks on the test device (Nothing A024, Android 17):
 - **Recovery after a long outage can be slow:** in one test YouTube took ~34 s after the network returned to resume (its own retry back-off), even with our `playVideo()` nudge. A real product may want a "Reconnect" fallback that restarts the player after N seconds.
 - **The URL is not truly secret:** the video ID is in the app binary and in network traffic. Fine for "no way from the UI"; not DRM.
 - **Muted autoplay at 00:00** loses the first 4.5 s of the video (see 4.6).
-- Time label is white on video; hard to read on bright scenes (could add a bottom gradient).
+- The design mock's `mm:ss / mm:ss` time label and red progress bar were removed on request, so there's no visible playback position (like a real live stream). Re-adding them is easy: `controller.videoStateStream` gives the position and `controller.value.metaData.duration` the length.
 - The `LIVE` pill is decorative; this is a VOD.
 - Release build is signed with the **debug key** (Flutter template default).
 
@@ -300,3 +303,236 @@ flutter pub get
 flutter run -d <device-id>          # debug on a connected phone
 flutter build apk --release         # → build/app/outputs/flutter-apk/app-release.apk
 ```
+
+---
+
+## Appendix A: Build it step by step
+
+This is the order to rebuild the feature in, with the code that does each part. Every step fixes something that **actually leaked** on the device; the "why" for each is in §4, and the story of how we found it is in Appendix B.
+
+### Step 1: Project and packages
+```bash
+flutter create --platforms android --project-name youtube_player_app .
+flutter pub add youtube_player_iframe webview_flutter connectivity_plus
+```
+In `android/app/src/main/AndroidManifest.xml`, inside `<manifest>`:
+```xml
+<uses-permission android:name="android.permission.INTERNET"/>
+```
+
+### Step 2: Create the controller (keyless, muted, early start, links blocked)
+```dart
+final controller = YoutubePlayerController(        // NOT .fromVideoId(): no key (step 8)
+  params: const YoutubePlayerParams(
+    showControls: false,                // controls=0
+    showFullscreenButton: false,
+    showVideoAnnotations: false,
+    strictRelatedVideos: true,
+    enableCaption: false,
+    pointerEvents: PointerEvents.none,  // the iframe never gets touches
+    mute: true,                         // unmuted when the intro cover lifts (step 6)
+  ),
+);
+
+// Start 4.5 s early so the intro hold ends exactly at the requested time.
+controller.loadVideoById(
+  videoId: videoId,
+  startSeconds: (startSeconds - 4.5).clamp(0, double.infinity).toDouble(),
+);
+
+// No link inside the player may open anything (logo, title, share…).
+controller.webViewController.setNavigationDelegate(
+  NavigationDelegate(onNavigationRequest: (_) => NavigationDecision.prevent),
+);
+```
+
+### Step 3: Fixed-size player, only scaled (never resized)
+Lay the player out once at a landscape-sized resolution and scale it into place. Same widget, same tree position, in both inline and fullscreen:
+```dart
+final size = MediaQuery.sizeOf(context);
+final baseW = size.longestSide, baseH = baseW * 9 / 16;       // fixed layout size
+final inlineW = size.shortestSide, inlineH = inlineW * 9 / 16;
+
+final scale = fullscreen
+    ? min(size.width / baseW, size.height / baseH)
+    : inlineW / baseW;
+final rect = fullscreen
+    ? Rect.fromCenter(center: size.center(Offset.zero),
+                      width: baseW * scale, height: baseH * scale)
+    : Rect.fromLTWH(0, topPadding, inlineW, inlineH);
+
+Positioned.fromRect(
+  rect: rect,
+  child: FittedBox(
+    fit: BoxFit.fill,
+    alignment: Alignment.topLeft,
+    child: SizedBox(
+      width: baseW, height: baseH,
+      child: YoutubePlayer(
+        key: ObjectKey(controller),            // new controller → new player (step 9)
+        controller: controller,
+        autoFullScreen: false,                 // we do fullscreen ourselves
+        enableFullScreenOnVerticalDrag: false,
+        backgroundColor: Colors.transparent,   // step 8
+        controlsBuilder: (context, _) => ..., // step 4
+      ),
+    ),
+  ),
+);
+```
+Fullscreen is just orientation + system UI + a new `rect`/`scale`. Never call the package's `enterFullScreen()`, because it resizes the WebView:
+```dart
+SystemChrome.setPreferredOrientations(fs
+    ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
+    : [DeviceOrientation.portraitUp]);
+SystemChrome.setEnabledSystemUIMode(
+    fs ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge);
+setState(() => _fullscreen = fs);
+```
+Wrap the page in `PopScope(canPop: !_fullscreen, ...)` so Back leaves fullscreen first.
+
+### Step 4: Draw everything on top through `controlsBuilder`, with the scale undone
+On phones the WebView sits in an overlay **above the page**, so a normal `Stack` over `YoutubePlayer` is hidden underneath it. Return all overlays from `controlsBuilder`. That layer inherits our scale, so undo it to keep buttons at normal size:
+```dart
+controlsBuilder: (context, _) => FittedBox(
+  fit: BoxFit.fill,
+  alignment: Alignment.topLeft,
+  child: SizedBox(
+    width: baseW * scale, height: baseH * scale,   // real on-screen size
+    child: _PlayerControls(...),                    // cover + back + LIVE + fullscreen
+  ),
+),
+```
+
+### Step 5: The cover state machine (`_PlayerControls`)
+Listen to `controller.stream`. Cover **immediately** on anything that isn't `playing`, and uncover only after a delay that outlasts YouTube's own fade:
+```dart
+void _onState(PlayerState s) {
+  final wasBuffering = _state == PlayerState.buffering;
+  _state = s;
+  if (s == PlayerState.playing) {
+    if (!_everPlayed) {                                   // first start
+      _everPlayed = true;
+      _uncover ??= Timer(_introHold /*4.5 s*/, () { controller.unMute(); _reveal(); });
+    } else {                                              // resume
+      _uncover ??= Timer(wasBuffering ? _afterBuffering /*5 s*/ : _settle /*1.2 s*/, _reveal);
+    }
+  } else {                                                // buffering / paused / ended / …
+    _uncover?.cancel(); _uncover = null; _covered = true;
+    if (_everPlayed && s == PlayerState.buffering) _stalled = true;
+  }
+  if (s == PlayerState.paused && appIsInForeground) controller.playVideo(); // no pause
+}
+```
+The cover itself is wrapped in `AbsorbPointer`, so taps on the video do nothing.
+
+### Step 6: Muted intro hold
+This is already in steps 2 and 5: start 4.5 s early, muted, keep the cover up for 4.5 s after the first `playing`, then `unMute()`. **Don't** seek to correct the position afterwards (see 4.6).
+
+### Step 7: No pause, ever
+- `AbsorbPointer` on the video (step 5)
+- `playVideo()` whenever `paused` arrives while the app is in the foreground (step 5)
+- `AppLifecycleListener(onResume: () => controller.playVideo())`: Android pauses the WebView in the background
+
+### Step 8: Loader from the first frame
+With a keyed controller (`.fromVideoId`), the package paints its own thumbnail on top of everything while booting. With **no key** and `backgroundColor: Colors.transparent` (steps 2 and 3), that boot layer is invisible and our loader shows from frame one.
+
+### Step 9: Network messages and recovery
+```dart
+final net = Connectivity();
+net.checkConnectivity().then(_onNet);
+_netSub = net.onConnectivityChanged.listen(_onNet);
+
+void _onNet(List<ConnectivityResult> r) {
+  final offline = r.every((c) => c == ConnectivityResult.none);
+  if (_offline && !offline) {
+    _everPlayed
+        ? controller.playVideo()           // mid-class: nudge YouTube to resume
+        : widget.onReconnectBeforeStart(); // never started: rebuild the player
+  }
+  setState(() => _offline = offline);
+}
+```
+The rebuild (in `LiveClassPage`):
+```dart
+void _restartPlayer() {
+  final old = _controller;
+  setState(() => _controller = _createController()); // YoutubePlayer is keyed by it
+  old.close();
+}
+```
+Loader message priority: offline → **Internet connection lost**; stalled and still buffering → **Weak internet connection**; stalled but playing again (5 s hold) → **Connection is back**; otherwise the breathing cue.
+
+### Step 10: The breathing loader
+An `AnimationController(duration: 2 s)..repeat(reverse: true)` drives:
+- three circles whose sizes and opacities follow `Curves.easeInOut`
+- a `self_improvement` icon in the middle
+- a headline that switches between *Breathe in… / Breathe out…* on the animation direction (`AnimatedSwitcher`), unless a network headline overrides it
+
+The whole thing is the `_Cover` while waiting. After the video ends, the cover shows the thumbnail instead.
+
+### Step 11: Pre-warm on the screen before joining
+```dart
+late final WebViewController _warmUp = WebViewController()
+  ..setJavaScriptMode(JavaScriptMode.unrestricted)
+  ..setNavigationDelegate(NavigationDelegate(
+      onNavigationRequest: (r) => r.url.contains('/embed/')
+          ? NavigationDecision.navigate : NavigationDecision.prevent))
+  ..loadRequest(Uri.parse('https://www.youtube-nocookie.com/embed/$videoId?controls=0'));
+```
+It's never displayed. It just starts the WebView engine and caches YouTube's scripts.
+
+### Step 12: Page layout around the video
+The page is a `Stack`:
+1. A `Column`, `Offstage` in fullscreen, containing:
+   - a spacer the height of the inline video
+   - the message row (pill `TextField` + round green send button)
+   - a `Spacer`
+   - the privacy banner (bottom padding = system inset, so it sits above the keyboard)
+2. The positioned video from step 3.
+
+### Step 13: Verify on a real device
+Use the screen-record → frame contact-sheet method in §6 for:
+- every start path (on time and late)
+- pause/resume
+- fullscreen in and out
+- a mid-class stall
+- joining offline
+
+If any frame shows YouTube UI, measure how long it stays and adjust the matching hold.
+
+---
+
+## Appendix B: How we got here (iteration log)
+
+Each row is one round of build → test on the phone → look at what leaked. Timings come from screen recordings split into 4–8 fps frame sheets, plus `[player] +ms state=…` logs.
+
+| # | What we tried | What we saw on the device | What we changed |
+|---|---|---|---|
+| 1 | Plain `youtube_player_iframe` with the video, autoplay | Plays, with full YouTube UI | Baseline |
+| 2 | `controls=0` + `pointerEvents: none` + `IgnorePointer`, a thumbnail cover when not playing | Pause bar ("More videos", link, logo) still flashed | Cover on pause; tap toggled play/pause |
+| 3 | Blocked the WebView `NavigationDelegate` | Logo/title/share taps could open YouTube via `url_launcher` | All navigation prevented |
+| 4 | Built the design mock (back, LIVE, time, fullscreen) in a `Stack` over the player | **None of our overlays showed**; the video was on top | Found the package's `OverlayPortal`; moved everything into `controlsBuilder` (4.3) |
+| 5 | Resume after pause | YouTube's pause bar fades out *after* playback resumes | 1.2 s `_settle` before uncovering |
+| 6 | Package fullscreen | Leaving fullscreen showed title + link + logo + pause icon for **~6–7 s** (measured frame by frame) | Fixed-size player that is only scaled; our own fullscreen (4.5) |
+| 7 | "No pause at all" request | — | Tap does nothing; auto-resume on `paused`; resume on app foreground |
+| 8 | Start of playback, frame by frame | Title bar for ~4 s after `playing` | Cover for 4.5 s after the first `playing` |
+| 9 | Fix the lost first 4.5 s by **seeking** back after the hold | Seek brought the title + pause icon back for another 3–4 s | ❌ Reverted |
+| 10 | Start **4.5 s early, muted**, then just unmute | Clean reveal exactly at the requested time | ✅ Kept (4.6) |
+| 11 | Spinner → yoga breathing loader | Package's own thumbnail covered our loader for ~2.5 s while booting | Keyless controller + transparent `backgroundColor` (4.8) |
+| 12 | Time label hidden while covered | Flashed `00:00` when it reappeared | Kept mounted with `maintainState` (label later removed on request) |
+| 13 | User screenshot: YouTube UI visible **while buffering** | Mid-class stall shows YouTube's full overlay + spinner | Cover on `buffering` too |
+| 14 | Forced stall (Wi-Fi + data off until `buffering`, then back on) with a 4 s hold | One frame of overlay at 4.0 s, gone by 4.25 s | `_afterBuffering` = 5 s |
+| 15 | Try to shorten the 4.5 s intro: reveal after 0.8 s with a **header band** over the title strip | Band hid the title, but a **centre pause icon and "More videos" chip** showed for ~3 s | ❌ Reverted; the overlay is full-player (measured: icon/chip gone +3.6 s, title +4.2 s) |
+| 16 | Measure boot time (`[player] +ms` logs) | Tap → `playing`: 2.3 s first join, 0.8–1.5 s later | Hidden pre-warm WebView on Home → first join 1.7 s (4.10) |
+| 17 | Join while offline, then reconnect | "Internet connection lost" showed, but after reconnect it was **stuck forever** (player script never loaded) | Rebuild the controller on reconnect if never played (4.9) |
+| 18 | Mid-class stall with the new messages | Offline → "Internet connection lost"; back online but still stalled → "Weak internet connection"; → "Connection is back" → clean video | ✅ |
+| 19 | UI trims on request | — | Removed the time label and red progress bar |
+
+**Tooling used throughout:**
+- `flutter run` on a USB-connected phone, plus `flutter analyze`
+- `adb shell input tap/text/keyevent` to drive the app
+- `adb shell screenrecord` + `ffmpeg` (`fps=4|8`, `crop`, `tile`) for frame-by-frame contact sheets
+- `adb exec-out screencap` for screenshots
+- `adb shell svc wifi|data disable/enable` to simulate network loss
+- `debugPrint('[player] …')` logs read from the `flutter run` output

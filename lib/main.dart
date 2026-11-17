@@ -249,7 +249,6 @@ class _LiveClassPageState extends State<LiveClassPage> {
                   child: Column(
                     children: [
                       SizedBox(height: topPad + inlineH),
-                      _ProgressBar(controller: _controller),
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                         child: _MessageInput(
@@ -499,29 +498,6 @@ class _PlayerControlsState extends State<_PlayerControls> {
               ),
             ),
             Positioned(left: pad + 48, top: pad + 6, child: const _LiveBadge()),
-            // Time label: only visible once the video is showing, but kept
-            // alive while hidden so it never flashes "00:00" when it reappears.
-            Positioned(
-              left: pad,
-              bottom: pad,
-              child: Visibility(
-                visible: !_covered,
-                maintainState: true,
-                child: StreamBuilder<YoutubeVideoState>(
-                  stream: widget.controller.videoStateStream,
-                  builder: (context, snap) => Text(
-                    '${_fmt(snap.data?.position ?? Duration.zero)} / '
-                    '${_fmt(widget.controller.value.metaData.duration)}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      shadows: [Shadow(blurRadius: 4, color: Colors.black54)],
-                    ),
-                  ),
-                ),
-              ),
-            ),
             Positioned(
               right: pad,
               bottom: pad - 6,
@@ -546,12 +522,6 @@ class _LoaderMessage {
   /// Bold line. Null → the breathing cue ("Breathe in… / Breathe out…").
   final String? headline;
   final String sub;
-}
-
-String _fmt(Duration d) {
-  final m = d.inMinutes.toString().padLeft(2, '0');
-  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
-  return '$m:$s';
 }
 
 class _Cover extends StatelessWidget {
@@ -776,30 +746,6 @@ class _LiveBadge extends StatelessWidget {
 }
 
 // ───────────────────────── Below the video ─────────────────────────
-
-class _ProgressBar extends StatelessWidget {
-  const _ProgressBar({required this.controller});
-
-  final YoutubePlayerController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<YoutubeVideoState>(
-      stream: controller.videoStateStream,
-      builder: (context, snap) {
-        final total = controller.value.metaData.duration.inMilliseconds;
-        final pos = snap.data?.position.inMilliseconds ?? 0;
-        final fraction = total > 0 ? (pos / total).clamp(0.0, 1.0) : 0.0;
-        return LinearProgressIndicator(
-          value: fraction,
-          minHeight: 4,
-          color: liveRed,
-          backgroundColor: const Color(0xFFD9D6D0),
-        );
-      },
-    );
-  }
-}
 
 class _MessageInput extends StatelessWidget {
   const _MessageInput({required this.controller, required this.onSend});
